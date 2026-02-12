@@ -27,13 +27,13 @@ namespace threading {
 struct CPUStreamsExecutor::Impl {
     struct Stream {
 #if OV_THREAD == OV_THREAD_TBB || OV_THREAD == OV_THREAD_TBB_AUTO || OV_THREAD == OV_THREAD_TBB_ADAPTIVE
-        struct Observer : public custom::task_scheduler_observer {
+        struct Observer : public tbb::task_scheduler_observer {
             CpuSet _mask;
             int _ncpus = 0;
             int _threadBindingStep = 0;
             std::vector<int> _cpu_ids;
-            Observer(custom::task_arena& arena, CpuSet mask, int ncpus, const std::vector<int> cpu_ids = {})
-                : custom::task_scheduler_observer(arena),
+            Observer(tbb::task_arena& arena, CpuSet mask, int ncpus, const std::vector<int> cpu_ids = {})
+                : tbb::task_scheduler_observer(arena),
                   _mask{std::move(mask)},
                   _ncpus(ncpus),
                   _cpu_ids(cpu_ids) {}
@@ -115,27 +115,20 @@ struct CPUStreamsExecutor::Impl {
             const auto tbb_version = TBB_runtime_interface_version();
 #    endif
             if (stream_type == STREAM_WITHOUT_PARAM) {
-                int version_major = tbb_version / 10;
-                int version_patch = tbb_version % 10;
-                bool support_core_types = false;
-                if ((version_major == TBB_VERSION_MAJOR_CORE_TYPES_WINDOWS &&
-                     version_patch >= TBB_VERSION_PATCH_CORE_TYPES_WINDOWS) ||
-                    (version_major == TBB_VERSION_MAJOR_CORE_TYPES_LINUX &&
-                     version_patch >= TBB_VERSION_PATCH_CORE_TYPES_LINUX)) {
-                    support_core_types = true;
-                }
-                const auto core_types = custom::info::core_types();
-                if (support_core_types && core_types.size() >= MIN_CORE_TYPES_FOR_PTL) {
-                    _taskArena.reset(new custom::task_arena{
-                        custom::task_arena::constraints{}
-                            .set_max_concurrency(concurrency)
-                            .set_max_threads_per_core(max_threads_per_core)
-                            .set_core_types({core_types.end() - MIN_CORE_TYPES_FOR_PTL + 1, core_types.end()})});
-                } else {
-                    _taskArena.reset(new custom::task_arena{custom::task_arena::constraints{}
-                                                                .set_max_concurrency(concurrency)
-                                                                .set_max_threads_per_core(max_threads_per_core)});
-                }
+                auto core_type_selector = [](auto core_type) {
+                    const auto& [id, index, total] = core_type;
+                    if (total < MIN_CORE_TYPES_FOR_PTL) {
+                        return 1; // Use all core types, so return the same positive score
+                    }
+                    return int(index); // Score by index: LPECore gets 0 (excluded), others get positive scores (included).
+                                       // Without runtime multi core type support, all core types will be used.
+                };
+                _taskArena.reset(new tbb::task_arena{
+                    tbb::task_arena::constraints{}
+                        .set_max_concurrency(concurrency)
+                        .set_max_threads_per_core(max_threads_per_core)
+                        .set_core_type(tbb::task_arena::selectable),
+                    core_type_selector});
             } else if (stream_type == STREAM_WITH_NUMA_ID) {
                 // Numa node id has used different mapping methods in TBBBind since oneTBB 2021.4.0
 #    if USE_TBBBIND_2_5
@@ -146,12 +139,12 @@ struct CPUStreamsExecutor::Impl {
                     real_numa_node_id = _numaNodeId;
                 }
 #    endif
-                _taskArena.reset(new custom::task_arena{custom::task_arena::constraints{}
-                                                            .set_numa_id(real_numa_node_id)
-                                                            .set_max_concurrency(concurrency)
-                                                            .set_max_threads_per_core(max_threads_per_core)});
+                _taskArena.reset(new tbb::task_arena{tbb::task_arena::constraints{}
+                                                         .set_numa_id(real_numa_node_id)
+                                                         .set_max_concurrency(concurrency)
+                                                         .set_max_threads_per_core(max_threads_per_core)});
             } else if (stream_type == STREAM_WITH_CORE_TYPE) {
-                const auto core_types = custom::info::core_types();
+                const auto core_types = tbb::info::core_types();
                 auto real_core_type = (core_type == MAIN_CORE_PROC || core_type == HYPER_THREADING_PROC)
                                           ? core_types.back()
                                           : core_types.front();
@@ -159,12 +152,12 @@ struct CPUStreamsExecutor::Impl {
                 if (core_type == EFFICIENT_CORE_PROC && core_types.size() >= MIN_CORE_TYPES_FOR_PTL) {
                     real_core_type = *(core_types.end() - MIN_CORE_TYPES_FOR_PTL + 1);
                 }
-                _taskArena.reset(new custom::task_arena{custom::task_arena::constraints{}
-                                                            .set_core_type(real_core_type)
-                                                            .set_max_concurrency(concurrency)
-                                                            .set_max_threads_per_core(max_threads_per_core)});
+                _taskArena.reset(new tbb::task_arena{tbb::task_arena::constraints{}
+                                                         .set_core_type(real_core_type)
+                                                         .set_max_concurrency(concurrency)
+                                                         .set_max_threads_per_core(max_threads_per_core)});
             } else {
-                _taskArena.reset(new custom::task_arena{concurrency});
+                _taskArena.reset(new tbb::task_arena{concurrency});
                 _cpu_ids =
                     stream_id < static_cast<int>(stream_processors.size()) ? stream_processors[stream_id] : _cpu_ids;
                 if (_cpu_ids.size() > 0) {
@@ -220,7 +213,7 @@ struct CPUStreamsExecutor::Impl {
         std::vector<int> _rank;
         std::queue<Task> _taskQueue;
 #if OV_THREAD == OV_THREAD_TBB || OV_THREAD == OV_THREAD_TBB_AUTO || OV_THREAD == OV_THREAD_TBB_ADAPTIVE
-        std::unique_ptr<custom::task_arena> _taskArena;
+        std::unique_ptr<tbb::task_arena> _taskArena;
         std::unique_ptr<Observer> _observer;
         std::vector<int> _cpu_ids;
 #elif OV_THREAD == OV_THREAD_SEQ
